@@ -1,0 +1,9 @@
+{
+  "name": "에어제타",
+  "short_name": "에어제타",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "icons": []
+}
