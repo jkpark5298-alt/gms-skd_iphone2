@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="에어제타" />
+  <title>에어제타</title>
+  <link rel="manifest" href="manifest.json" />
+  <style>
+    :root{
+      --bg:#f8fafc; --card:#ffffff; --ink:#0f172a; --muted:#475569; --line:#e2e8f0;
+      --brand:#0f172a; --brand2:#1d4ed8; --ok:#166534; --warn:#92400e; --err:#b91c1c;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Apple SD Gothic Neo,"Noto Sans KR",sans-serif}
+    .wrap{max-width:860px;margin:0 auto;padding:20px 16px 40px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 8px 24px rgba(15,23,42,.06);margin-bottom:16px}
+    h1{font-size:28px;margin:0 0 8px}
+    h2{font-size:18px;margin:0 0 12px}
+    p,li{line-height:1.55}
+    .sub{color:var(--muted);margin:0}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .btn{appearance:none;border:none;background:var(--brand2);color:#fff;padding:14px 16px;border-radius:12px;font-weight:700;cursor:pointer}
+    .btn.secondary{background:var(--brand)}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    input[type=file]{width:100%;padding:12px;border:1px dashed var(--line);border-radius:12px;background:#fff}
+    .log{white-space:pre-wrap;background:#0b1220;color:#dbeafe;border-radius:12px;padding:14px;min-height:140px;font-size:13px}
+    .tag{display:inline-block;padding:5px 10px;border-radius:999px;background:#e0ecff;color:#1e40af;font-size:12px;font-weight:700}
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+    code{background:#eef2ff;padding:2px 6px;border-radius:6px}
+    .small{font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <span class="tag">iPhone Safari / PWA</span>
+      <h1>에어제타</h1>
+      <p class="sub">엑셀 파일을 불러와 정리 후 다시 <code>.xlsx</code>로 저장합니다.</p>
+    </div>
+
+    <div class="card">
+      <h2>이번 규칙</h2>
+      <ol>
+        <li><code>STD</code>, <code>STA</code> 열은 삭제합니다.</li>
+        <li><code>ETD/ETA</code>, <code>R/O L/D</code>, <code>T/O R/I</code> 3개 열에 모두 데이터가 있으면 그 행은 삭제합니다.</li>
+        <li><code>ETD/ETA</code> 기준 오름차순 정렬합니다.</li>
+        <li>정렬 후 <code>R/O L/D</code> 열에 위에서부터 <b>A, B, A, B...</b> 순서로 채웁니다.</li>
+      </ol>
+      <p class="small">※ "A, B를 순서대로"는 일반적으로 <b>A/B 반복</b>으로 해석해 반영했습니다. 원하시면 A,A,A... 또는 앞 2행만 A/B 등으로 바꿔드릴 수 있습니다.</p>
+    </div>
+
+    <div class="card">
+      <h2>파일 처리</h2>
+      <div class="row">
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.xml,.xma" />
+        <button id="runBtn" class="btn">변환 후 다운로드</button>
+      </div>
+      <p class="small">권장 형식: <code>.xlsx</code></p>
+    </div>
+
+    <div class="card">
+      <h2>처리 로그</h2>
+      <div id="log" class="log">준비 완료</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+    }
+
+    const logEl = document.getElementById('log');
+    const fileInput = document.getElementById('fileInput');
+    const runBtn = document.getElementById('runBtn');
+
+    function log(msg){ logEl.textContent += "\\n" + msg; logEl.scrollTop = logEl.scrollHeight; }
+    function resetLog(){ logEl.textContent = "시작"; }
+
+    function normalizeHeader(v){
+      return String(v ?? '')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g,'')
+        .replace(/[()\-_.]/g,'')
+        .trim()
+        .toUpperCase();
+    }
+
+    function isNonEmpty(v){
+      return v !== undefined && v !== null && String(v).trim() !== '';
+    }
+
+    function findHeaderRow(rows, maxCheck=15){
+      for(let r=0; r<Math.min(rows.length, maxCheck); r++){
+        const row = (rows[r] || []).map(normalizeHeader);
+        const score = row.filter(h =>
+          h.includes('ETD') || h.includes('ETA') || h.includes('R/OLD'.replace('/','')) ||
+          h.includes('T/ORI'.replace('/','')) || h === 'STD' || h === 'STA'
+        ).length;
+        if(score >= 1) return r;
+      }
+      return 0;
+    }
+
+    function findColumn(headers, aliases){
+      const norm = headers.map(normalizeHeader);
+      for(const alias of aliases){
+        const a = normalizeHeader(alias);
+        let idx = norm.findIndex(h => h === a);
+        if(idx !== -1) return idx;
+      }
+      for(const alias of aliases){
+        const a = normalizeHeader(alias);
+        let idx = norm.findIndex(h => h.includes(a) || a.includes(h));
+        if(idx !== -1) return idx;
+      }
+      return -1;
+    }
+
+    function excelDateToJSDate(v){
+      if(typeof v === 'number'){
+        const epoch = new Date(Date.UTC(1899,11,30));
+        return new Date(epoch.getTime() + v * 86400000);
+      }
+      return null;
+    }
+
+    function parseSortableDate(v){
+      if(v === undefined || v === null || String(v).trim() === '') return null;
+      if(typeof v === 'number') return excelDateToJSDate(v);
+      const s = String(v).trim();
+
+      let m;
+      m = s.match(/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?$/);
+      if(m) return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), Number(m[4]||0), Number(m[5]||0));
+
+      m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?$/);
+      if(m){
+        const now = new Date();
+        return new Date(now.getFullYear(), Number(m[1])-1, Number(m[2]), Number(m[3]||0), Number(m[4]||0));
+      }
+
+      m = s.match(/^(\d{1,2}):(\d{2})$/);
+      if(m){
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), Number(m[1]), Number(m[2]));
+      }
+
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    function formatDateK(date){
+      const y = date.getFullYear();
+      const m = String(date.getMonth()+1).padStart(2,'0');
+      const d = String(date.getDate()).padStart(2,'0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function formatDateTimeK(date){
+      const y = date.getFullYear();
+      const m = String(date.getMonth()+1).padStart(2,'0');
+      const d = String(date.getDate()).padStart(2,'0');
+      const hh = String(date.getHours()).padStart(2,'0');
+      const mm = String(date.getMinutes()).padStart(2,'0');
+      return `${y}-${m}-${d} ${hh}:${mm}`;
+    }
+
+    async function processFile(file){
+      resetLog();
+      log(`파일: ${file.name}`);
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type:'array', cellDates:true });
+      const firstSheetName = wb.SheetNames[0];
+      if(!firstSheetName) throw new Error('시트를 찾지 못했습니다.');
+      const ws = wb.Sheets[firstSheetName];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+
+      const headerRowIndex = findHeaderRow(rows);
+      const headers = rows[headerRowIndex] || [];
+      log(`헤더 행: ${headerRowIndex + 1}행`);
+
+      const idxEtdEta = findColumn(headers, ['ETD/ETA','ETDETA','ETD ETA']);
+      const idxROLD   = findColumn(headers, ['R/O L/D','ROLD','R O L D']);
+      const idxTORI   = findColumn(headers, ['T/O R/I','TORI','T O R I']);
+      const idxSTD    = findColumn(headers, ['STD']);
+      const idxSTA    = findColumn(headers, ['STA']);
+
+      if(idxEtdEta === -1){
+        throw new Error('ETD/ETA 열을 찾지 못했습니다. 감지된 헤더: ' + headers.join(' | '));
+      }
+      if(idxROLD === -1){
+        throw new Error('R/O L/D 열을 찾지 못했습니다. 감지된 헤더: ' + headers.join(' | '));
+      }
+
+      log(`ETD/ETA 열: ${idxEtdEta + 1}열`);
+      log(`R/O L/D 열: ${idxROLD + 1}열`);
+      log(`T/O R/I 열: ${idxTORI === -1 ? '없음' : (idxTORI + 1) + '열'}`);
+      log(`STD 열: ${idxSTD === -1 ? '없음' : (idxSTD + 1) + '열'}, STA 열: ${idxSTA === -1 ? '없음' : (idxSTA + 1) + '열'}`);
+
+      const before = rows.slice(0, headerRowIndex);
+      let body = rows.slice(headerRowIndex + 1).filter(r => Array.isArray(r) && r.some(v => isNonEmpty(v)));
+
+      const beforeDeleteCount = body.length;
+      if(idxTORI !== -1){
+        body = body.filter(r => !(isNonEmpty(r[idxEtdEta]) && isNonEmpty(r[idxROLD]) && isNonEmpty(r[idxTORI])));
+      }
+      log(`3개 열 모두 값 있는 행 삭제: ${beforeDeleteCount - body.length}행`);
+
+      body.sort((a,b)=>{
+        const da = parseSortableDate(a[idxEtdEta]);
+        const db = parseSortableDate(b[idxEtdEta]);
+        if(da && db) return da - db;
+        if(da && !db) return -1;
+        if(!da && db) return 1;
+        return String(a[idxEtdEta] ?? '').localeCompare(String(b[idxEtdEta] ?? ''), 'ko');
+      });
+      log('ETD/ETA 오름차순 정렬 완료');
+
+      for(let i=0;i<body.length;i++){
+        body[i][idxROLD] = (i % 2 === 0) ? 'A' : 'B';
+      }
+      log('R/O L/D 열에 A, B 반복 입력 완료');
+
+      // Remove STD/STA columns from header+body
+      const removeSet = new Set([idxSTD, idxSTA].filter(v => v !== -1));
+      function removeCols(row){
+        return row.filter((_, idx) => !removeSet.has(idx));
+      }
+
+      const newHeaders = removeCols(headers);
+      const newBody = body.map(removeCols);
+
+      const outRows = [];
+      const now = new Date();
+      outRows.push([`에어제타 (${formatDateK(now)})`]);
+      outRows.push([]);
+      outRows.push(newHeaders);
+      for(const r of newBody) outRows.push(r);
+      outRows.push([]);
+      const writeRow = new Array(Math.max(newHeaders.length-1,0)).fill('');
+      writeRow.push(`작성시간 ${formatDateTimeK(now)}`);
+      outRows.push(writeRow);
+
+      const outWb = XLSX.utils.book_new();
+      const outWs = XLSX.utils.aoa_to_sheet(outRows);
+
+      // simple width guess
+      const widths = newHeaders.map((h, ci) => {
+        let maxLen = String(h ?? '').length;
+        for(const r of newBody.slice(0, 500)){
+          maxLen = Math.max(maxLen, String(r[ci] ?? '').length);
+        }
+        return { wch: Math.min(Math.max(maxLen + 2, 8), 24) };
+      });
+      outWs['!cols'] = widths;
+      outWs['!merges'] = [{s:{r:0,c:0}, e:{r:0,c:Math.max(newHeaders.length-1,0)}}];
+
+      XLSX.utils.book_append_sheet(outWb, outWs, '에어제타');
+
+      const outName = file.name.replace(/\.[^.]+$/, '') + '_airzeta.xlsx';
+      XLSX.writeFile(outWb, outName, { compression: true });
+      log(`완료: ${outName}`);
+    }
+
+    runBtn.addEventListener('click', async () => {
+      try{
+        const file = fileInput.files && fileInput.files[0];
+        if(!file){ alert('먼저 파일을 선택하세요.'); return; }
+        runBtn.disabled = true;
+        await processFile(file);
+      }catch(err){
+        console.error(err);
+        log('오류: ' + err.message);
+        alert(err.message);
+      }finally{
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
